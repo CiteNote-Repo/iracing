@@ -1,0 +1,9 @@
+*.ibt
+*.log
+*.html
+__pycache__/
+*.pyc
+.DS_Store
+bilateral_config.json
+live_grip_config.json
+fuel_config.json

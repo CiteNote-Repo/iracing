@@ -1,0 +1,8 @@
+pyirsdk
+pyyaml
+numpy
+pandas
+matplotlib
+scipy
+plotly
+sounddevice

@@ -25,19 +25,41 @@ class GripData:
 
 
 def compute_live_utilization(
-    gLat: float, speed: float, yaw_rate: float, peak_glat_g: float = 2.30
+    gLat: float,
+    speed: float,
+    yaw_rate: float,
+    peak_glat_g: float = 2.30,
+    steering_angle: float = 0.0,
 ) -> tuple:
-    """Returns (front_util_pct, rear_util_pct, total_util_pct), each 0-130."""
+    """
+    Returns (front_util_pct, rear_util_pct, total_util_pct), each 0-130.
+
+    Total lateral utilization comes from gLat directly.
+    Front/rear split uses steering angle vs yaw rate as the decomposition:
+    - High steering angle relative to yaw rate = front working hard (entry/push)
+    - High yaw rate relative to steering = rear working hard (rotation/exit)
+    - Both high simultaneously = bilateral state
+
+    Both axles are scaled to total_util so they can both read high
+    simultaneously when the car is at its overall limit — they don't
+    sum to 100%, they each represent their contribution to peak_glat_g.
+    """
     glat_abs = abs(gLat)
     total_util = min(glat_abs / peak_glat_g * 100.0, 130.0)
 
-    # Rotation-driven G (rear axle signature)
-    yaw_g = (speed * abs(yaw_rate)) / _G
-    # Steering-driven residual G (front axle signature)
-    steer_g = max(glat_abs - yaw_g, 0.0)
+    steer_abs = abs(steering_angle)
+    yaw_abs = abs(yaw_rate)
 
-    rear_util = min((yaw_g / peak_glat_g) * 100.0, 130.0)
-    front_util = min((steer_g / peak_glat_g) * 100.0, 130.0)
+    # Steering reference: ~0.3 rad is a meaningful corner input
+    # YawRate reference: ~0.5 rad/s is meaningful rotation
+    steer_norm = min(steer_abs / 0.3, 1.0)
+    yaw_norm = min(yaw_abs / 0.5, 1.0)
+
+    # Each axle's utilization = total utilization × its normalized activity
+    # This allows both to be high simultaneously (bilateral state)
+    # and both to be low on straights
+    front_util = min(total_util * steer_norm, 130.0)
+    rear_util = min(total_util * yaw_norm, 130.0)
 
     return front_util, rear_util, total_util
 
@@ -67,11 +89,12 @@ def compute_grip(
     yaw_rate: float,
     is_on_track: bool,
     peak_glat_g: float,
+    steering_angle: float = 0.0,
     rear_surface_mps: Optional[float] = None,
     front_surface_mps: Optional[float] = None,
 ) -> GripData:
     front_util, rear_util, total_util = compute_live_utilization(
-        gLat, speed, yaw_rate, peak_glat_g
+        gLat, speed, yaw_rate, peak_glat_g, steering_angle
     )
 
     rear_slip: Optional[float] = None

@@ -203,7 +203,10 @@ def main() -> None:
                   "Install with: pip install sounddevice")
         else:
             try:
-                vol = args.volume if args.volume is not None else float(cfg.get("audio_volume", 0.15))
+                if args.volume is not None:
+                    vol = max(0.0, min(0.30, args.volume))
+                else:
+                    vol = float(cfg.get("audio_volume", 0.015))
                 synth = GripToneSynth(
                     blocksize=args.blocksize,
                     volume=vol,

@@ -109,10 +109,10 @@ class GripToneSynth:
             if self._muted:
                 outdata[:] = 0.0
                 # Keep gliding toward target so resumption is already converged
-                self._freq += (self._freq_target - self._freq) * 0.10
+                self._freq += (self._freq_target - self._freq) * 0.25
                 return
 
-            self._freq += (self._freq_target - self._freq) * 0.15
+            self._freq += (self._freq_target - self._freq) * 0.40
             freq          = self._freq
             vol           = self._volume
             harmonic_mix  = self._harmonic_mix

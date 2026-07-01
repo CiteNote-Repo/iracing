@@ -111,7 +111,7 @@ class GripOverlay:
 
         row("  " + "─" * 28, FONT_META, "#333333")
 
-        self._lbl_steer_eff = row("  Steer eff:    --", FONT_META, COLOR_DIM)
+        self._lbl_scrub = row("  Front scrub:  --", FONT_META, COLOR_DIM)
         self._lbl_rear_slip = row("  Rear slip:    --", FONT_META, COLOR_DIM)
 
         row("  " + "─" * 28, FONT_META, "#333333")
@@ -129,7 +129,7 @@ class GripOverlay:
         if not grip.connected:
             blank = "░" * _BAR_CHARS
             self._lbl_util.configure(text=f"  {blank}   --%", fg=COLOR_DIM)
-            self._lbl_steer_eff.configure(text="  Steer eff:    --", fg=COLOR_DIM)
+            self._lbl_scrub.configure(text="  Front scrub:  --", fg=COLOR_DIM)
             self._lbl_rear_slip.configure(text="  Rear slip:    --", fg=COLOR_DIM)
             self._lbl_state.configure(text="  Waiting for iRacing...  ", fg=COLOR_DIM)
         else:
@@ -142,14 +142,19 @@ class GripOverlay:
                 fg=util_color,
             )
 
-            if grip.steer_efficiency_pct > 0:
-                self._lbl_steer_eff.configure(
-                    text=f"  Steer eff:  {grip.steer_efficiency_pct:3.0f}%",
-                    fg=COLOR_WHITE if active else COLOR_DIM,
+            if grip.scrub_proximity_pct > 0:
+                scrub_color = (
+                    COLOR_RED if grip.scrub_proximity_pct < 60.0 else
+                    COLOR_ORANGE if grip.scrub_proximity_pct < 80.0 else
+                    COLOR_WHITE
+                ) if active else COLOR_DIM
+                self._lbl_scrub.configure(
+                    text=f"  Front scrub: {grip.scrub_proximity_pct:3.0f}%",
+                    fg=scrub_color,
                 )
             else:
-                self._lbl_steer_eff.configure(
-                    text="  Steer eff:    --",
+                self._lbl_scrub.configure(
+                    text="  Front scrub:  --",
                     fg=COLOR_DIM,
                 )
 

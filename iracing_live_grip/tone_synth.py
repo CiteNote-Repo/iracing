@@ -58,7 +58,7 @@ class GripToneSynth:
     def set_state(
         self,
         total_util: float,
-        steer_efficiency_pct: float,
+        scrub_proximity_pct: float,
         rear_slip_raw: float,
         active: bool,
     ) -> None:
@@ -70,13 +70,16 @@ class GripToneSynth:
 
             self._freq_target = self._util_to_freq(total_util)
 
-            # steer_efficiency_pct == 0 means no data — stay pure
-            if steer_efficiency_pct <= 0 or steer_efficiency_pct >= 70.0:
+            # scrub_proximity_pct == 0 means no data (gates not met) — stay pure.
+            # >80 = front efficient → clean tone.
+            # 60-80 = approaching scrub → subtle harmonic.
+            # <60 = past scrub peak → clearly rougher tone.
+            if scrub_proximity_pct <= 0 or scrub_proximity_pct > 80.0:
                 self._harmonic_mix = 0.0
-            elif steer_efficiency_pct >= 40.0:
+            elif scrub_proximity_pct >= 60.0:
                 self._harmonic_mix = 0.05
             else:
-                self._harmonic_mix = 0.10
+                self._harmonic_mix = 0.15
 
             # Slip pulse: fire once on rising edge, reset on hysteresis fall
             if rear_slip_raw > _SLIP_ON and not self._slip_above:

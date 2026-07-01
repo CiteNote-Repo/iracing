@@ -1,6 +1,5 @@
 import math
 import threading
-from typing import Optional
 
 try:
     import numpy as np
@@ -9,14 +8,21 @@ try:
 except ImportError:
     _AVAILABLE = False
 
+_PULSE_FREQ = 80.0   # Hz — rear slip alert tone
+_PULSE_VOL  = 0.25   # independent of main volume
+_PULSE_DUR  = 0.08   # seconds
+_SLIP_ON    = 0.03   # rising threshold
+_SLIP_OFF   = 0.02   # hysteresis reset
+
 
 class GripToneSynth:
     """
-    Continuous stereo sine-wave synthesiser.
-    LEFT channel = front axle utilisation.
-    RIGHT channel = rear axle utilisation.
-    Frequency glides smoothly to avoid zipper noise.
-    Phase is tracked in radians so it stays continuous across blocks.
+    Continuous stereo synthesiser driven by three grip metrics.
+
+    Both channels carry the same pitch (total utilisation).
+    Steering efficiency adds a second harmonic, making the tone subtly
+    rougher when the front is scrubbing.
+    Rear slip fires a single 80 Hz pulse in the right ear on the rising edge.
     """
 
     def __init__(
@@ -29,17 +35,19 @@ class GripToneSynth:
         self._blocksize = blocksize
         self._volume = volume
 
-        # Freq state — shared with telemetry thread via lock
-        self._front_freq: float = 110.0
-        self._rear_freq: float = 110.0
-        self._front_freq_target: float = 110.0
-        self._rear_freq_target: float = 110.0
+        # Shared state — written by telemetry thread, read by audio callback
+        self._freq: float = 110.0
+        self._freq_target: float = 110.0
+        self._harmonic_mix: float = 0.0      # 0.0, 0.05, or 0.10
         self._muted: bool = True
+        self._slip_above: bool = False        # hysteresis state
+        self._pulse_samples_remaining: int = 0
         self._lock = threading.Lock()
 
-        # Phase state — only ever touched from the audio callback thread
-        self._front_phase: float = 0.0  # radians
-        self._rear_phase: float = 0.0
+        # Phase state — audio callback thread only, never touched under lock
+        self._phase: float = 0.0
+        self._harmonic_phase: float = 0.0
+        self._pulse_phase: float = 0.0
 
         self._stream = None
 
@@ -47,22 +55,44 @@ class GripToneSynth:
     def available() -> bool:
         return _AVAILABLE
 
-    def set_utilization(self, front_pct: float, rear_pct: float, active: bool) -> None:
-        """Called from telemetry thread to update target frequencies."""
+    def set_state(
+        self,
+        total_util: float,
+        steer_efficiency_pct: float,
+        rear_slip_raw: float,
+        active: bool,
+    ) -> None:
+        """Called from telemetry thread ~60 Hz."""
         with self._lock:
             self._muted = not active
-            if active:
-                self._front_freq_target = self._util_to_freq(front_pct)
-                self._rear_freq_target = self._util_to_freq(rear_pct)
+            if not active:
+                return
+
+            self._freq_target = self._util_to_freq(total_util)
+
+            # steer_efficiency_pct == 0 means no data — stay pure
+            if steer_efficiency_pct <= 0 or steer_efficiency_pct >= 70.0:
+                self._harmonic_mix = 0.0
+            elif steer_efficiency_pct >= 40.0:
+                self._harmonic_mix = 0.05
+            else:
+                self._harmonic_mix = 0.10
+
+            # Slip pulse: fire once on rising edge, reset on hysteresis fall
+            if rear_slip_raw > _SLIP_ON and not self._slip_above:
+                self._slip_above = True
+                self._pulse_samples_remaining = int(_PULSE_DUR * self._sample_rate)
+            elif rear_slip_raw < _SLIP_OFF:
+                self._slip_above = False
 
     @staticmethod
     def _util_to_freq(util_pct: float) -> float:
         """
-        Map 0-130% → 110-880 Hz with an exponential-ish curve:
-          0-50%:   110-165 Hz  (quiet background presence)
-          50-90%:  165-440 Hz  (approaching limit)
-          90-100%: 440-660 Hz  (critical zone, steep)
-          100%+:   660-880 Hz  (over-limit, capped)
+        Map 0-130% → 110-880 Hz:
+          0-50%:   110-165 Hz
+          50-90%:  165-440 Hz
+          90-100%: 440-660 Hz
+          100%+:   660-880 Hz
         """
         u = max(0.0, min(util_pct, 130.0))
         if u < 50.0:
@@ -75,44 +105,52 @@ class GripToneSynth:
             return 660.0 + min((u - 100.0) / 30.0, 1.0) * 220.0
 
     def _audio_callback(self, outdata, frames, time_info, status):
-        # Acquire lock only for scalar glide + copy — not during numpy ops
         with self._lock:
             if self._muted:
                 outdata[:] = 0.0
-                # Keep frequencies gliding toward targets even while muted so
-                # resumption at speed is already converged
-                glide = 0.10
-                self._front_freq += (self._front_freq_target - self._front_freq) * glide
-                self._rear_freq += (self._rear_freq_target - self._rear_freq) * glide
+                # Keep gliding toward target so resumption is already converged
+                self._freq += (self._freq_target - self._freq) * 0.10
                 return
 
-            glide = 0.15
-            self._front_freq += (self._front_freq_target - self._front_freq) * glide
-            self._rear_freq += (self._rear_freq_target - self._rear_freq) * glide
-            ff = self._front_freq
-            rf = self._rear_freq
-            vol = self._volume
+            self._freq += (self._freq_target - self._freq) * 0.15
+            freq          = self._freq
+            vol           = self._volume
+            harmonic_mix  = self._harmonic_mix
+            pulse_samples = min(self._pulse_samples_remaining, frames)
+            self._pulse_samples_remaining -= pulse_samples
 
-        sr = self._sample_rate
+        sr     = self._sample_rate
         two_pi = 2.0 * math.pi
+        n      = np.arange(frames, dtype=np.float64)
 
-        # Phase-continuous block synthesis
-        # n = sample indices within this block
-        n = np.arange(frames, dtype=np.float64)
+        # Fundamental + optional second harmonic, normalised to constant peak
+        fundamental = np.sin(two_pi * freq / sr * n + self._phase)
+        harmonic2   = np.sin(two_pi * 2.0 * freq / sr * n + self._harmonic_phase)
+        wave = vol * (fundamental + harmonic_mix * harmonic2) / (1.0 + harmonic_mix)
 
-        front_wave = (vol * np.sin(two_pi * ff / sr * n + self._front_phase)).astype(np.float32)
-        self._front_phase = math.fmod(
-            self._front_phase + two_pi * ff * frames / sr, two_pi
+        # Advance phases — harmonic_phase advances even when mix=0 so it is
+        # already in the right place when efficiency drops and it kicks in
+        self._phase = math.fmod(
+            self._phase + two_pi * freq * frames / sr, two_pi
+        )
+        self._harmonic_phase = math.fmod(
+            self._harmonic_phase + two_pi * 2.0 * freq * frames / sr, two_pi
         )
 
-        rear_wave = (vol * np.sin(two_pi * rf / sr * n + self._rear_phase)).astype(np.float32)
-        self._rear_phase = math.fmod(
-            self._rear_phase + two_pi * rf * frames / sr, two_pi
-        )
+        wave = wave.astype(np.float32)
+        outdata[:, 0] = wave
+        outdata[:, 1] = wave.copy()
 
-        # LEFT = front, RIGHT = rear
-        outdata[:, 0] = front_wave
-        outdata[:, 1] = rear_wave
+        # Right-ear slip pulse — additive, right channel only
+        if pulse_samples > 0:
+            p     = np.arange(pulse_samples, dtype=np.float64)
+            pulse = (_PULSE_VOL * np.sin(
+                two_pi * _PULSE_FREQ / sr * p + self._pulse_phase
+            )).astype(np.float32)
+            self._pulse_phase = math.fmod(
+                self._pulse_phase + two_pi * _PULSE_FREQ * pulse_samples / sr, two_pi
+            )
+            outdata[:pulse_samples, 1] += pulse
 
     def start(self) -> None:
         if not _AVAILABLE:

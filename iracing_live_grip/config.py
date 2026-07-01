@@ -11,8 +11,8 @@ DEFAULTS = {
     "audio_volume": 0.15,
     "min_speed_for_audio": 5.0,
     "car_overrides": {
-        "Ferrari 296 GT3": {"peak_glat_g": 2.30},
-        "Acura NSX GT3 EVO22": {"peak_glat_g": 1.93},
+        "Ferrari 296 GT3": {"peak_glat_g": 2.30, "steering_ratio": 13.0},
+        "Acura NSX GT3 EVO22": {"peak_glat_g": 1.93, "steering_ratio": 14.0},
     },
 }
 
@@ -46,3 +46,11 @@ def resolve_peak_glat(cfg: dict, car_name: str = "") -> float:
         if name.lower() in car_name.lower() or car_name.lower() in name.lower():
             return float(vals.get("peak_glat_g", cfg["peak_glat_g"]))
     return float(cfg["peak_glat_g"])
+
+
+def resolve_steering_ratio(cfg: dict, car_name: str = "") -> float:
+    overrides = cfg.get("car_overrides", {})
+    for name, vals in overrides.items():
+        if name.lower() in car_name.lower() or car_name.lower() in name.lower():
+            return float(vals.get("steering_ratio", 13.0))
+    return 13.0

@@ -43,7 +43,7 @@ def _check_deps(audio: bool) -> None:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-from config import load_config, update_overlay_position, resolve_peak_glat
+from config import load_config, update_overlay_position, resolve_peak_glat, resolve_steering_ratio
 from grip_calculator import GripData, classify_acoustic_state
 from live_telemetry import LiveTelemetry
 from tone_synth import GripToneSynth
@@ -66,22 +66,22 @@ def parse_args() -> argparse.Namespace:
 
 # ── test mode ─────────────────────────────────────────────────────────────────
 
-# Each tuple: (time_s, front_util_pct, rear_util_pct)
+# Each tuple: (time_s, total_util_pct, steer_eff_pct, rear_slip_raw)
 _TEST_PHASES = [
-    (0.0,    0.0,   0.0),
-    (2.0,    0.0,   0.0),
-    (4.0,   90.0,   5.0),
-    (6.0,  105.0, 105.0),
-    (8.0,   10.0, 115.0),
-    (10.0,   0.0,   0.0),
+    (0.0,    0.0,    0.0,  0.00),
+    (2.0,    0.0,    0.0,  0.00),
+    (4.0,   90.0,   85.0,  0.00),   # peak grip, front working efficiently
+    (6.0,  108.0,   52.0,  0.07),   # over limit, rear sliding
+    (8.0,   10.0,   20.0,  0.00),   # unwinding
+    (10.0,   0.0,    0.0,  0.00),
 ]
 
 _TEST_ANNOUNCE = [
-    (0.0,  "[0-2s]   Both quiet — low tone (110 Hz both channels)"),
-    (2.0,  "[2-4s]   Front rising — left channel climbs, right stays low"),
-    (4.0,  "[4-6s]   Both rising — channels converge toward unison (BILATERAL STATE)"),
-    (6.0,  "[6-8s]   Rear exceeds 100% — right channel crosses into HOWL range"),
-    (8.0,  "[8-10s]  Both decay back to quiet"),
+    (0.0,  "[0-2s]   Idle — total util 0%, no metrics active"),
+    (2.0,  "[2-4s]   Building — approaching peak grip"),
+    (4.0,  "[4-6s]   90% util, steer eff 85% — PEAK GRIP HISS (front working well)"),
+    (6.0,  "[6-8s]   108% util, rear slip 7% — OVERSTEER HOWL"),
+    (8.0,  "[8-10s]  Unwinding — all metrics decaying"),
 ]
 
 
@@ -89,12 +89,16 @@ def _interp(phases, t: float) -> tuple:
     """Linear interpolation between test phase keyframes."""
     t = t % phases[-1][0]
     for i in range(len(phases) - 1):
-        t0, f0, r0 = phases[i]
-        t1, f1, r1 = phases[i + 1]
+        t0, tu0, se0, rs0 = phases[i]
+        t1, tu1, se1, rs1 = phases[i + 1]
         if t0 <= t < t1:
             frac = (t - t0) / (t1 - t0)
-            return f0 + frac * (f1 - f0), r0 + frac * (r1 - r0)
-    return phases[-1][1], phases[-1][2]
+            return (
+                tu0 + frac * (tu1 - tu0),
+                se0 + frac * (se1 - se0),
+                rs0 + frac * (rs1 - rs0),
+            )
+    return phases[-1][1], phases[-1][2], phases[-1][3]
 
 
 def run_test_mode(
@@ -121,25 +125,16 @@ def run_test_mode(
                 print(f"  {_TEST_ANNOUNCE[phase_idx][1]}")
             last_phase = phase_idx
 
-        front_util, rear_util = _interp(_TEST_PHASES, t)
-        total_util = max(front_util, rear_util)
+        total_util, steer_eff_pct, rear_slip_raw = _interp(_TEST_PHASES, t)
 
-        # Inject simulated rear slip only when rear is meaningfully over-limit
-        rear_slip = 0.06 if rear_util > 90.0 else None
-
-        front_state = classify_acoustic_state(front_util)
-        rear_state = classify_acoustic_state(rear_util, rear_slip=rear_slip)
-        overall_state = classify_acoustic_state(
-            total_util, rear_slip=rear_slip
-        )
+        rear_slip = rear_slip_raw if rear_slip_raw > 0.03 else None
+        overall_state = classify_acoustic_state(total_util, rear_slip=rear_slip)
 
         data = GripData(
-            front_util=front_util,
-            rear_util=rear_util,
             total_util=total_util,
-            front_state=front_state,
-            rear_state=rear_state,
             overall_state=overall_state,
+            steer_efficiency_pct=steer_eff_pct,
+            rear_slip_raw=rear_slip_raw,
             is_on_track=True,
             speed_mps=100.0,
             connected=True,
@@ -148,7 +143,7 @@ def run_test_mode(
 
         if synth:
             active = data.speed_mps >= min_speed_for_audio
-            synth.set_utilization(front_util, rear_util, active=active)
+            synth.set_state(total_util, steer_eff_pct, rear_slip_raw, active=active)
 
         time.sleep(1.0 / 60.0)
 
@@ -168,7 +163,7 @@ def run_live(
     def on_update(data: GripData) -> None:
         if synth:
             active = data.connected and data.is_on_track and data.speed_mps >= min_speed_for_audio
-            synth.set_utilization(data.front_util, data.rear_util, active=active)
+            synth.set_state(data.total_util, data.steer_efficiency_pct, data.rear_slip_raw, active=active)
 
     telem.run(ir, on_update=on_update)
 
@@ -184,9 +179,10 @@ def main() -> None:
 
     cfg = load_config()
     peak_glat_g = resolve_peak_glat(cfg, args.car)
+    steering_ratio = resolve_steering_ratio(cfg, args.car)
 
     if args.car:
-        print(f"Car: {args.car!r} → peak_glat_g = {peak_glat_g:.2f} G")
+        print(f"Car: {args.car!r} → peak_glat_g = {peak_glat_g:.2f} G, steering_ratio = {steering_ratio:.1f}")
     else:
         print(f"peak_glat_g = {peak_glat_g:.2f} G  (set --car or edit live_grip_config.json)")
 
@@ -212,7 +208,7 @@ def main() -> None:
         print("Audio: OFF  (--no-audio)")
 
     # ── telemetry provider ──
-    telem = LiveTelemetry(peak_glat_g)
+    telem = LiveTelemetry(peak_glat_g, steering_ratio=steering_ratio)
     min_speed = float(cfg.get("min_speed_for_audio", 5.0))
 
     # ── overlay ──

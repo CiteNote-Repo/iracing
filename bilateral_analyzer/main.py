@@ -109,6 +109,7 @@ def _run_analysis(args: argparse.Namespace, cfg: dict) -> None:
             output_path=out_path,
             session_label="DEMO — four synthetic driving styles",
             tick_rate=60,
+            steering_ratio=car_params["steering_ratio"],
         )
         elapsed = time.time() - t0
         print(f"Demo report generated in {elapsed:.1f}s → {out_path}")
@@ -176,6 +177,7 @@ def _run_analysis(args: argparse.Namespace, cfg: dict) -> None:
         session_label=label1,
         tick_rate=tick_rate,
         compare=compare_data,
+        steering_ratio=car_params["steering_ratio"],
     )
 
     elapsed = time.time() - t0

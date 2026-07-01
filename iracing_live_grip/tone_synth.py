@@ -15,11 +15,15 @@ _SLIP_OFF   = 0.02   # hysteresis reset
 
 class GripToneSynth:
     """
-    Continuous stereo pink-noise texture engine driven by grip metrics.
+    Stereo pink-noise engine with front-back HRTF spatial positioning.
 
-    Left channel:  bandpass-shaped pink noise with 60 Hz AM scrub modulation.
-    Right channel: same shaped noise plus a noise burst on rear slide rising edge.
-    Spectral band widens as total utilisation climbs toward the limit.
+    Base texture (overall tyre load) goes to both ears equally.
+    Front scrub signal is processed through a frontal HRTF boost (4-6 kHz pinna
+    resonance) so it appears to come from in front of the listener.
+    Rear slide transient is processed through a rear HRTF notch (8-10 kHz pinna
+    shadow) plus low-frequency emphasis so it appears to come from behind.
+    A 5-sample ITD on the rear signal reinforces the back-of-head cue.
+    Enable Windows Sonic or Dolby Atmos in Windows Sound Settings for best results.
     """
 
     def __init__(
@@ -44,6 +48,15 @@ class GripToneSynth:
         self._frame_offset: int = 0
         if _AVAILABLE:
             self._pink_state = np.zeros(8)
+            # Pre-compute HRTF filter coefficients — fixed frequency so safe to cache
+            from scipy.signal import butter
+            nyq = sample_rate / 2
+            self._front_sos      = butter(2, [3500/nyq, 7000/nyq],
+                                          btype='band',     output='sos')
+            self._rear_notch_sos = butter(2, [7500/nyq, min(11000/nyq, 0.99)],
+                                          btype='bandstop', output='sos')
+            self._rear_low_sos   = butter(2, 400/nyq,
+                                          btype='low',      output='sos')
 
         self._stream = None
 
@@ -133,6 +146,23 @@ class GripToneSynth:
         modulator = 1.0 - depth * 0.4 * (0.5 + 0.5 * np.sin(2 * np.pi * 60 * t))
         return signal * modulator
 
+    def _apply_front_hrtf(self, signal: np.ndarray) -> np.ndarray:
+        """Approximate HRTF for sound positioned in front.
+        Boost 4-6kHz (pinna resonance for frontal sounds), applied to both channels.
+        """
+        from scipy.signal import sosfilt
+        boost = sosfilt(self._front_sos, signal) * 0.4
+        return signal + boost
+
+    def _apply_rear_hrtf(self, signal: np.ndarray) -> np.ndarray:
+        """Approximate HRTF for sound positioned behind.
+        Notch at 8-10kHz (pinna shadowing) plus low-frequency emphasis.
+        """
+        from scipy.signal import sosfilt
+        signal = sosfilt(self._rear_notch_sos, signal)
+        boost = sosfilt(self._rear_low_sos, signal) * 0.3
+        return signal + boost
+
     def _rear_slide_transient(self, frames: int) -> np.ndarray:
         sr = self._sample_rate
         attack_s  = int(0.002 * sr)
@@ -160,22 +190,37 @@ class GripToneSynth:
             pulse_samples = min(self._pulse_samples_remaining, frames)
             self._pulse_samples_remaining -= pulse_samples
 
-        # Generate and shape pink noise
+        # Base texture: pink noise shaped by total utilisation → both ears equally
         noise  = self._pink_noise(frames)
         shaped = self._shape_spectrum(noise, total_util)
         shaped = shaped.astype(np.float32) * vol
 
-        # Left channel: scrub modulation applied
-        left  = self._apply_scrub_modulation(shaped.copy(), scrub_prox, self._frame_offset)
-        # Right channel: clean shaped noise
-        right = shaped.copy()
+        # Front scrub signal: AM modulation when scrub_prox < 70%
+        # Processed through front HRTF — appears to come from in front
+        front_signal      = self._apply_scrub_modulation(shaped.copy(), scrub_prox, self._frame_offset)
+        front_spatialized = self._apply_front_hrtf(front_signal)
 
-        # Add rear slide transient to right channel only
+        # Rear slide signal: noise burst when rear slip detected
+        # Processed through rear HRTF — appears to come from behind
+        rear_signal = shaped.copy()
         if pulse_samples > 0:
-            right[:pulse_samples] += self._rear_slide_transient(frames)[:pulse_samples].astype(np.float32)
+            transient = self._rear_slide_transient(frames)
+            rear_signal[:pulse_samples] += transient[:pulse_samples].astype(np.float32)
+        rear_spatialized = self._apply_rear_hrtf(rear_signal)
 
-        outdata[:, 0] = left
-        outdata[:, 1] = right
+        # Mix: base texture in both channels, spatial signals additive on top
+        left  = shaped * 0.5 + front_spatialized * 0.4 + rear_spatialized * 0.2
+        right = shaped * 0.5 + front_spatialized * 0.4 + rear_spatialized * 0.2
+
+        # 5-sample ITD on rear signal: left ear receives it slightly later,
+        # reinforcing the rear-of-head spatial cue
+        itd_samples = 5
+        if len(rear_spatialized) > itd_samples:
+            left  += np.pad(rear_spatialized, (itd_samples, 0))[:frames] * 0.15
+            right += rear_spatialized * 0.15
+
+        outdata[:, 0] = np.clip(left,  -1.0, 1.0).astype(np.float32)
+        outdata[:, 1] = np.clip(right, -1.0, 1.0).astype(np.float32)
         self._frame_offset += frames
 
     def start(self) -> None:

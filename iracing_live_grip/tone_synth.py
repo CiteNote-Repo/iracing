@@ -30,7 +30,7 @@ class GripToneSynth:
         self,
         sample_rate: int = 44100,
         blocksize: int = 512,
-        volume: float = 0.15,
+        volume: float = 0.015,
     ):
         self._sample_rate = sample_rate
         self._blocksize = blocksize
@@ -109,29 +109,32 @@ class GripToneSynth:
         return out
 
     def _shape_spectrum(self, noise: np.ndarray, total_util: float) -> np.ndarray:
-        from scipy.signal import butter, sosfilt
+        from scipy.signal import sosfilt
         sr = self._sample_rate
         if total_util < 70:
-            low, high = 200, 2000
+            low, high = 200, 1500
+            gain = 0.15                           # near-silent whisper
         elif total_util < 90:
             ratio = (total_util - 70) / 20
             low, high = 200, int(2000 + ratio * 6000)
+            gain = 0.15 + ratio * 0.85            # ramps to full
         elif total_util <= 100:
             low, high = 500, 8000
+            gain = 1.0                            # full zipper texture
         else:
             over = min((total_util - 100) / 30, 1.0)
             low, high = 200, int(8000 - over * 6500)
+            gain = 1.0 - over * 0.3              # slightly reduced past limit
         nyq = sr / 2
         high = min(high, int(nyq * 0.95))
         low = max(low, 20)
-        # Recompute coefficients only when band changes; stateful zi is never
-        # used so reusing cached sos is safe and artifact-free.
         if not hasattr(self, '_sos_cache') or self._sos_cache[0] != (low, high):
+            from scipy.signal import butter
             sos = butter(2, [low / nyq, high / nyq], btype='band', output='sos')
             self._sos_cache = ((low, high), sos)
         else:
             sos = self._sos_cache[1]
-        return sosfilt(sos, noise)
+        return sosfilt(sos, noise) * gain
 
     def _apply_scrub_modulation(
         self,
@@ -139,7 +142,8 @@ class GripToneSynth:
         scrub_proximity: float,
         frame_offset: int,
     ) -> np.ndarray:
-        if scrub_proximity >= 70:
+        # 0 means no data (gates not met) — never modulate in this case
+        if scrub_proximity <= 0 or scrub_proximity >= 70:
             return signal
         depth = (70 - scrub_proximity) / 70
         t = (np.arange(len(signal)) + frame_offset) / self._sample_rate

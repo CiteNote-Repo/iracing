@@ -90,8 +90,17 @@ class LiveTelemetry:
 
                 is_on_track = bool(ir["IsOnTrack"])
                 speed = float(ir["Speed"] or 0.0)
-                gLat = float(ir["gLat"] or 0.0)
-                yaw_rate = float(ir["YawRate"] or 0.0)
+                _glat_raw = ir["gLat"]
+                if _glat_raw is None:
+                    _lataccel = ir["LatAccel"]
+                    gLat = float(_lataccel) / 9.80665 if _lataccel is not None else 0.0
+                else:
+                    gLat = float(_glat_raw)
+
+                _yr_raw = ir["YawRate"]
+                if _yr_raw is None or abs(float(_yr_raw)) < 1e-6:
+                    _yr_raw = ir["yawrate"]
+                yaw_rate = float(_yr_raw) if _yr_raw is not None else 0.0
                 steering_angle = float(ir["SteeringWheelAngle"] or 0.0)
 
                 # Lazy wheel speed format detection — probe once car is moving

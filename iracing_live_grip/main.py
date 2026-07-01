@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--blocksize", type=int, default=512,
                    help="Audio blocksize in samples (default 512; try 256 or 128 "
                         "for lower latency — watch for iRacing frame stutters)")
+    p.add_argument("--alpha", type=float, default=None,
+                   help="Overlay opacity 0.0-1.0 (overrides config)")
+    p.add_argument("--volume", type=float, default=None,
+                   help="Audio volume 0.0-1.0 (overrides config)")
+    p.add_argument("--audio-only", action="store_true",
+                   help="Run audio synthesis without showing the visual overlay")
     return p.parse_args()
 
 
@@ -178,6 +184,9 @@ def main() -> None:
         _check_deps(audio=want_audio)
 
     cfg = load_config()
+    if args.alpha is not None:
+        cfg["overlay_alpha"] = max(0.0, min(1.0, args.alpha))
+
     peak_glat_g = resolve_peak_glat(cfg, args.car)
     steering_ratio = resolve_steering_ratio(cfg, args.car)
 
@@ -194,13 +203,13 @@ def main() -> None:
                   "Install with: pip install sounddevice")
         else:
             try:
+                vol = args.volume if args.volume is not None else float(cfg.get("audio_volume", 0.15))
                 synth = GripToneSynth(
                     blocksize=args.blocksize,
-                    volume=float(cfg.get("audio_volume", 0.15)),
+                    volume=vol,
                 )
                 synth.start()
-                print(f"Audio: ON  (blocksize={args.blocksize}, "
-                      f"vol={cfg.get('audio_volume', 0.15):.2f})")
+                print(f"Audio: ON  (blocksize={args.blocksize}, vol={vol:.2f})")
             except Exception as e:
                 print(f"Audio failed to start: {e}\nContinuing with visual only.")
                 synth = None
@@ -210,12 +219,6 @@ def main() -> None:
     # ── telemetry provider ──
     telem = LiveTelemetry(peak_glat_g, steering_ratio=steering_ratio)
     min_speed = float(cfg.get("min_speed_for_audio", 5.0))
-
-    # ── overlay ──
-    def on_drag_end(x: int, y: int) -> None:
-        update_overlay_position(cfg, x, y)
-
-    overlay = GripOverlay(cfg, telem.get_grip, on_drag_end=on_drag_end)
 
     # ── background thread ──
     if args.test:
@@ -233,12 +236,27 @@ def main() -> None:
 
     bg.start()
 
-    # Overlay runs on main thread (tkinter requirement)
-    try:
-        overlay.run()
-    finally:
-        if synth:
-            synth.stop()
+    # ── overlay or audio-only block ──
+    if args.audio_only:
+        print("Audio-only mode — no visual overlay.")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if synth:
+                synth.stop()
+    else:
+        def on_drag_end(x: int, y: int) -> None:
+            update_overlay_position(cfg, x, y)
+
+        overlay = GripOverlay(cfg, telem.get_grip, on_drag_end=on_drag_end)
+        try:
+            overlay.run()
+        finally:
+            if synth:
+                synth.stop()
 
 
 if __name__ == "__main__":

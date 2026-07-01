@@ -39,6 +39,8 @@ from logger import log_info, log_error
 def parse_args():
     p = argparse.ArgumentParser(description="iRacing Fuel Calculator")
     p.add_argument("--test", action="store_true", help="Run with simulated data (no iRacing)")
+    p.add_argument("--alpha", type=float, default=None,
+                   help="Overlay opacity 0.0-1.0 (overrides config)")
     return p.parse_args()
 
 
@@ -170,6 +172,9 @@ def main():
         _check_deps()
 
     cfg = load_config()
+    if args.alpha is not None:
+        cfg["overlay_alpha"] = max(0.0, min(1.0, args.alpha))
+
     tracker = FuelTracker(cfg)
 
     def on_drag_end(x, y):

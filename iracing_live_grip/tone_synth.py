@@ -1,4 +1,3 @@
-import math
 import threading
 
 try:
@@ -8,21 +7,19 @@ try:
 except ImportError:
     _AVAILABLE = False
 
-_PULSE_FREQ = 80.0   # Hz — rear slip alert tone
-_PULSE_VOL  = 0.25   # independent of main volume
-_PULSE_DUR  = 0.08   # seconds
+_PULSE_VOL  = 0.25   # rear slide transient volume
+_PULSE_DUR  = 0.08   # seconds — controls how long the transient gate stays open
 _SLIP_ON    = 0.03   # rising threshold
 _SLIP_OFF   = 0.02   # hysteresis reset
 
 
 class GripToneSynth:
     """
-    Continuous stereo synthesiser driven by three grip metrics.
+    Continuous stereo pink-noise texture engine driven by grip metrics.
 
-    Both channels carry the same pitch (total utilisation).
-    Steering efficiency adds a second harmonic, making the tone subtly
-    rougher when the front is scrubbing.
-    Rear slip fires a single 80 Hz pulse in the right ear on the rising edge.
+    Left channel:  bandpass-shaped pink noise with 60 Hz AM scrub modulation.
+    Right channel: same shaped noise plus a noise burst on rear slide rising edge.
+    Spectral band widens as total utilisation climbs toward the limit.
     """
 
     def __init__(
@@ -36,18 +33,17 @@ class GripToneSynth:
         self._volume = volume
 
         # Shared state — written by telemetry thread, read by audio callback
-        self._freq: float = 110.0
-        self._freq_target: float = 110.0
-        self._harmonic_mix: float = 0.0      # 0.0, 0.05, or 0.10
+        self._total_util: float = 0.0
+        self._scrub_proximity: float = 100.0
         self._muted: bool = True
-        self._slip_above: bool = False        # hysteresis state
+        self._slip_above: bool = False
         self._pulse_samples_remaining: int = 0
         self._lock = threading.Lock()
 
-        # Phase state — audio callback thread only, never touched under lock
-        self._phase: float = 0.0
-        self._harmonic_phase: float = 0.0
-        self._pulse_phase: float = 0.0
+        # Audio callback thread only
+        self._frame_offset: int = 0
+        if _AVAILABLE:
+            self._pink_state = np.zeros(8)
 
         self._stream = None
 
@@ -67,93 +63,120 @@ class GripToneSynth:
             self._muted = not active
             if not active:
                 return
-
-            self._freq_target = self._util_to_freq(total_util)
-
-            # scrub_proximity_pct == 0 means no data (gates not met) — stay pure.
-            # >80 = front efficient → clean tone.
-            # 60-80 = approaching scrub → subtle harmonic.
-            # <60 = past scrub peak → clearly rougher tone.
-            if scrub_proximity_pct <= 0 or scrub_proximity_pct > 80.0:
-                self._harmonic_mix = 0.0
-            elif scrub_proximity_pct >= 60.0:
-                self._harmonic_mix = 0.05
-            else:
-                self._harmonic_mix = 0.15
-
-            # Slip pulse: fire once on rising edge, reset on hysteresis fall
+            self._total_util = total_util
+            self._scrub_proximity = scrub_proximity_pct
+            # Slip transient: fire once on rising edge, reset on hysteresis fall
             if rear_slip_raw > _SLIP_ON and not self._slip_above:
                 self._slip_above = True
                 self._pulse_samples_remaining = int(_PULSE_DUR * self._sample_rate)
             elif rear_slip_raw < _SLIP_OFF:
                 self._slip_above = False
 
-    @staticmethod
-    def _util_to_freq(util_pct: float) -> float:
+    def _pink_noise(self, frames: int) -> np.ndarray:
+        """Generate pink noise (1/f spectrum) via Voss-McCartney algorithm.
+
+        Pre-generates all random values in vectorized numpy calls and maintains
+        a running sum to avoid calling state.sum() 512 times per block.
         """
-        Map 0-130% → 110-880 Hz:
-          0-50%:   110-165 Hz
-          50-90%:  165-440 Hz
-          90-100%: 440-660 Hz
-          100%+:   660-880 Hz
-        """
-        u = max(0.0, min(util_pct, 130.0))
-        if u < 50.0:
-            return 110.0 + (u / 50.0) * 55.0
-        elif u < 90.0:
-            return 165.0 + ((u - 50.0) / 40.0) * 275.0
-        elif u < 100.0:
-            return 440.0 + ((u - 90.0) / 10.0) * 220.0
+        if not hasattr(self, '_pink_state'):
+            self._pink_state = np.zeros(8)
+        white = np.random.randn(frames)
+        idxs  = np.random.randint(0, 8, frames)
+        vals  = np.random.randn(frames)
+        out   = np.empty(frames)
+        state = self._pink_state
+        running_sum = state.sum()
+        for i in range(frames):
+            running_sum += vals[i] - state[idxs[i]]
+            state[idxs[i]] = vals[i]
+            out[i] = white[i] + running_sum
+        peak = np.abs(out).max()
+        if peak > 0:
+            out /= peak
+        return out
+
+    def _shape_spectrum(self, noise: np.ndarray, total_util: float) -> np.ndarray:
+        from scipy.signal import butter, sosfilt
+        sr = self._sample_rate
+        if total_util < 70:
+            low, high = 200, 2000
+        elif total_util < 90:
+            ratio = (total_util - 70) / 20
+            low, high = 200, int(2000 + ratio * 6000)
+        elif total_util <= 100:
+            low, high = 500, 8000
         else:
-            return 660.0 + min((u - 100.0) / 30.0, 1.0) * 220.0
+            over = min((total_util - 100) / 30, 1.0)
+            low, high = 200, int(8000 - over * 6500)
+        nyq = sr / 2
+        high = min(high, int(nyq * 0.95))
+        low = max(low, 20)
+        # Recompute coefficients only when band changes; stateful zi is never
+        # used so reusing cached sos is safe and artifact-free.
+        if not hasattr(self, '_sos_cache') or self._sos_cache[0] != (low, high):
+            sos = butter(2, [low / nyq, high / nyq], btype='band', output='sos')
+            self._sos_cache = ((low, high), sos)
+        else:
+            sos = self._sos_cache[1]
+        return sosfilt(sos, noise)
+
+    def _apply_scrub_modulation(
+        self,
+        signal: np.ndarray,
+        scrub_proximity: float,
+        frame_offset: int,
+    ) -> np.ndarray:
+        if scrub_proximity >= 70:
+            return signal
+        depth = (70 - scrub_proximity) / 70
+        t = (np.arange(len(signal)) + frame_offset) / self._sample_rate
+        modulator = 1.0 - depth * 0.4 * (0.5 + 0.5 * np.sin(2 * np.pi * 60 * t))
+        return signal * modulator
+
+    def _rear_slide_transient(self, frames: int) -> np.ndarray:
+        sr = self._sample_rate
+        attack_s  = int(0.002 * sr)
+        sustain_s = int(0.040 * sr)
+        decay_s   = int(0.025 * sr)
+        total_s   = attack_s + sustain_s + decay_s
+        envelope = np.zeros(total_s)
+        envelope[:attack_s] = np.linspace(0, 1, attack_s)
+        envelope[attack_s:attack_s + sustain_s] = 1.0
+        envelope[attack_s + sustain_s:] = np.linspace(1, 0, decay_s)
+        burst = np.random.randn(total_s) * envelope * _PULSE_VOL
+        out = np.zeros(frames)
+        copy_len = min(total_s, frames)
+        out[:copy_len] = burst[:copy_len]
+        return out
 
     def _audio_callback(self, outdata, frames, time_info, status):
         with self._lock:
             if self._muted:
                 outdata[:] = 0.0
-                # Keep gliding toward target so resumption is already converged
-                self._freq += (self._freq_target - self._freq) * 0.25
                 return
-
-            self._freq += (self._freq_target - self._freq) * 0.40
-            freq          = self._freq
+            total_util    = self._total_util
+            scrub_prox    = self._scrub_proximity
             vol           = self._volume
-            harmonic_mix  = self._harmonic_mix
             pulse_samples = min(self._pulse_samples_remaining, frames)
             self._pulse_samples_remaining -= pulse_samples
 
-        sr     = self._sample_rate
-        two_pi = 2.0 * math.pi
-        n      = np.arange(frames, dtype=np.float64)
+        # Generate and shape pink noise
+        noise  = self._pink_noise(frames)
+        shaped = self._shape_spectrum(noise, total_util)
+        shaped = shaped.astype(np.float32) * vol
 
-        # Fundamental + optional second harmonic, normalised to constant peak
-        fundamental = np.sin(two_pi * freq / sr * n + self._phase)
-        harmonic2   = np.sin(two_pi * 2.0 * freq / sr * n + self._harmonic_phase)
-        wave = vol * (fundamental + harmonic_mix * harmonic2) / (1.0 + harmonic_mix)
+        # Left channel: scrub modulation applied
+        left  = self._apply_scrub_modulation(shaped.copy(), scrub_prox, self._frame_offset)
+        # Right channel: clean shaped noise
+        right = shaped.copy()
 
-        # Advance phases — harmonic_phase advances even when mix=0 so it is
-        # already in the right place when efficiency drops and it kicks in
-        self._phase = math.fmod(
-            self._phase + two_pi * freq * frames / sr, two_pi
-        )
-        self._harmonic_phase = math.fmod(
-            self._harmonic_phase + two_pi * 2.0 * freq * frames / sr, two_pi
-        )
-
-        wave = wave.astype(np.float32)
-        outdata[:, 0] = wave
-        outdata[:, 1] = wave.copy()
-
-        # Right-ear slip pulse — additive, right channel only
+        # Add rear slide transient to right channel only
         if pulse_samples > 0:
-            p     = np.arange(pulse_samples, dtype=np.float64)
-            pulse = (_PULSE_VOL * np.sin(
-                two_pi * _PULSE_FREQ / sr * p + self._pulse_phase
-            )).astype(np.float32)
-            self._pulse_phase = math.fmod(
-                self._pulse_phase + two_pi * _PULSE_FREQ * pulse_samples / sr, two_pi
-            )
-            outdata[:pulse_samples, 1] += pulse
+            right[:pulse_samples] += self._rear_slide_transient(frames)[:pulse_samples].astype(np.float32)
+
+        outdata[:, 0] = left
+        outdata[:, 1] = right
+        self._frame_offset += frames
 
     def start(self) -> None:
         if not _AVAILABLE:

@@ -8,8 +8,8 @@ try:
 except ImportError:
     _AVAILABLE = False
 
-_SLIP_ON  = 0.03
-_SLIP_OFF = 0.02
+_SLIP_ON  = 15.0   # yaw deviation % — oversteer burst trigger
+_SLIP_OFF = 8.0
 
 
 def _util_to_freq(util: float) -> float:
@@ -67,7 +67,7 @@ class GripToneSynth:
         self,
         total_util: float,
         scrub_proximity_pct: float,
-        rear_slip_raw: float,
+        yaw_deviation_pct: float,
         active: bool,
     ) -> None:
         with self._lock:
@@ -75,10 +75,10 @@ class GripToneSynth:
             if not active:
                 return
             self._total_util = total_util
-            if rear_slip_raw > _SLIP_ON and not self._slip_above:
+            if yaw_deviation_pct > _SLIP_ON and not self._slip_above:
                 self._slip_above = True
                 self._burst_pending = True
-            elif rear_slip_raw < _SLIP_OFF:
+            elif yaw_deviation_pct < _SLIP_OFF:
                 self._slip_above = False
 
     def _make_burst(self) -> "np.ndarray":

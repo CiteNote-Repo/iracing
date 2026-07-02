@@ -72,21 +72,21 @@ def parse_args() -> argparse.Namespace:
 
 # ── test mode ─────────────────────────────────────────────────────────────────
 
-# Each tuple: (time_s, total_util_pct, scrub_proximity_pct, rear_slip_raw)
+# Each tuple: (time_s, total_util_pct, scrub_proximity_pct, yaw_deviation_pct)
 _TEST_PHASES = [
-    (0.0,    0.0,    0.0,  0.00),
-    (2.0,    0.0,    0.0,  0.00),
-    (4.0,   90.0,   90.0,  0.00),   # peak grip, front efficient (>80% → clean tone)
-    (6.0,  108.0,   45.0,  0.07),   # over limit, front scrubbing (<60% → rough), rear sliding
-    (8.0,   10.0,    0.0,  0.00),   # unwinding (no data — gates not met)
-    (10.0,   0.0,    0.0,  0.00),
+    (0.0,    0.0,    0.0,   0.0),
+    (2.0,    0.0,    0.0,   0.0),
+    (4.0,   90.0,   90.0,   0.0),   # peak grip, front efficient (>80% → clean tone)
+    (6.0,  108.0,   45.0,  20.0),   # over limit, front scrubbing (<60% → rough), oversteer burst
+    (8.0,   10.0,    0.0,   0.0),   # unwinding (no data — gates not met)
+    (10.0,   0.0,    0.0,   0.0),
 ]
 
 _TEST_ANNOUNCE = [
     (0.0,  "[0-2s]   Idle — total util 0%, no metrics active"),
     (2.0,  "[2-4s]   Building — approaching peak grip"),
     (4.0,  "[4-6s]   90% util, scrub proximity 90% — PEAK GRIP HISS (front efficient, clean tone)"),
-    (6.0,  "[6-8s]   108% util, scrub proximity 45% — front scrubbing (rough tone) + rear slide pulse"),
+    (6.0,  "[6-8s]   108% util, scrub proximity 45% — front scrubbing (rough tone) + oversteer yaw burst"),
     (8.0,  "[8-10s]  Unwinding — all metrics decaying"),
 ]
 
@@ -131,16 +131,16 @@ def run_test_mode(
                 print(f"  {_TEST_ANNOUNCE[phase_idx][1]}")
             last_phase = phase_idx
 
-        total_util, scrub_proximity_pct, rear_slip_raw = _interp(_TEST_PHASES, t)
+        total_util, scrub_proximity_pct, yaw_deviation_pct = _interp(_TEST_PHASES, t)
 
-        rear_slip = rear_slip_raw if rear_slip_raw > 0.03 else None
-        overall_state = classify_acoustic_state(total_util, rear_slip=rear_slip)
+        yaw_as_slip = (yaw_deviation_pct / 100.0) if yaw_deviation_pct > 15.0 else None
+        overall_state = classify_acoustic_state(total_util, rear_slip=yaw_as_slip)
 
         data = GripData(
             total_util=total_util,
             overall_state=overall_state,
             scrub_proximity_pct=scrub_proximity_pct,
-            rear_slip_raw=rear_slip_raw,
+            yaw_deviation_pct=yaw_deviation_pct,
             is_on_track=True,
             speed_mps=100.0,
             connected=True,
@@ -149,7 +149,7 @@ def run_test_mode(
 
         if synth:
             active = data.speed_mps >= min_speed_for_audio
-            synth.set_state(total_util, scrub_proximity_pct, rear_slip_raw, active=active)
+            synth.set_state(total_util, scrub_proximity_pct, yaw_deviation_pct, active=active)
 
         time.sleep(1.0 / 60.0)
 
@@ -169,7 +169,7 @@ def run_live(
     def on_update(data: GripData) -> None:
         if synth:
             active = data.connected and data.is_on_track and data.speed_mps >= min_speed_for_audio
-            synth.set_state(data.total_util, data.scrub_proximity_pct, data.rear_slip_raw, active=active)
+            synth.set_state(data.total_util, data.scrub_proximity_pct, data.yaw_deviation_pct, active=active)
 
     telem.run(ir, on_update=on_update)
 

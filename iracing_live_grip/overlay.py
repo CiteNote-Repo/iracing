@@ -13,6 +13,7 @@ COLOR_WHITE = "#FFFFFF"
 COLOR_DIM = "#666666"
 COLOR_ORANGE = "#E67E22"
 COLOR_RED = "#E74C3C"
+COLOR_BLUE = "#3498DB"
 
 _STATE_COLORS = {
     QUIET:          "#555555",
@@ -112,7 +113,7 @@ class GripOverlay:
         row("  " + "─" * 28, FONT_META, "#333333")
 
         self._lbl_scrub = row("  Front scrub:  --", FONT_META, COLOR_DIM)
-        self._lbl_rear_slip = row("  Rear slip:    --", FONT_META, COLOR_DIM)
+        self._lbl_yaw_dev = row("  Yaw dev:      --", FONT_META, COLOR_DIM)
 
         row("  " + "─" * 28, FONT_META, "#333333")
 
@@ -130,7 +131,7 @@ class GripOverlay:
             blank = "░" * _BAR_CHARS
             self._lbl_util.configure(text=f"  {blank}   --%", fg=COLOR_DIM)
             self._lbl_scrub.configure(text="  Front scrub:  --", fg=COLOR_DIM)
-            self._lbl_rear_slip.configure(text="  Rear slip:    --", fg=COLOR_DIM)
+            self._lbl_yaw_dev.configure(text="  Yaw dev:      --", fg=COLOR_DIM)
             self._lbl_state.configure(text="  Waiting for iRacing...  ", fg=COLOR_DIM)
         else:
             active = grip.is_on_track and grip.speed_mps >= 5.0
@@ -158,16 +159,20 @@ class GripOverlay:
                     fg=COLOR_DIM,
                 )
 
-            slip_abs = abs(grip.rear_slip_raw)
-            if slip_abs > 0.03:
-                slip_color = COLOR_RED if slip_abs > 0.08 else COLOR_ORANGE
-                self._lbl_rear_slip.configure(
-                    text=f"  Rear slip:  {slip_abs * 100:3.0f}%",
-                    fg=slip_color,
+            yaw = grip.yaw_deviation_pct
+            if abs(yaw) >= 1.0:
+                sign = "+" if yaw >= 0 else ""
+                if yaw > 0:
+                    yaw_color = COLOR_RED if yaw > 30.0 else COLOR_ORANGE
+                else:
+                    yaw_color = COLOR_BLUE
+                self._lbl_yaw_dev.configure(
+                    text=f"  Yaw dev: {sign}{yaw:3.0f}%",
+                    fg=yaw_color if active else COLOR_DIM,
                 )
             else:
-                self._lbl_rear_slip.configure(
-                    text="  Rear slip:    --",
+                self._lbl_yaw_dev.configure(
+                    text="  Yaw dev:      --",
                     fg=COLOR_DIM,
                 )
 

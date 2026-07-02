@@ -7,9 +7,10 @@ from grip_calculator import GripData, compute_grip, TYRE_RADIUS
 
 
 class LiveTelemetry:
-    def __init__(self, peak_glat_g: float, steering_ratio: float = 13.0):
+    def __init__(self, peak_glat_g: float, steering_ratio: float = 13.0, wheelbase_m: float = 2.63):
         self._peak_glat_g = peak_glat_g
         self._steering_ratio = steering_ratio
+        self._wheelbase_m = wheelbase_m
         self._grip_data = GripData()
         self._lock = threading.Lock()
         self._wheel_format: Optional[str] = None  # "rads", "mps", or "none"
@@ -110,8 +111,6 @@ class LiveTelemetry:
                     if self._wheel_format != "none":
                         print(f"Wheel speed format: {self._wheel_format}")
 
-                rear_mps, front_mps = self._get_wheel_surfaces(ir)
-
                 data = compute_grip(
                     gLat=gLat,
                     speed=speed,
@@ -120,8 +119,7 @@ class LiveTelemetry:
                     peak_glat_g=self._peak_glat_g,
                     steering_angle=steering_angle,
                     steering_ratio=self._steering_ratio,
-                    rear_surface_mps=rear_mps,
-                    front_surface_mps=front_mps,
+                    wheelbase_m=self._wheelbase_m,
                 )
 
                 with self._lock:

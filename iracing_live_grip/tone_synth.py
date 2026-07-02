@@ -13,10 +13,29 @@ _SLIP_OFF = 0.02
 
 
 def _util_to_freq(util: float) -> float:
-    """Linear interp: 0%→200Hz, 50%→400Hz, 100%→800Hz."""
+    """
+    Non-linear pitch mapping — dedicates most pitch space to
+    the 70-100% zone where limit sensitivity matters most.
+
+    0%  → 200Hz  (barely audible presence)
+    50% → 280Hz  (building, still background)
+    70% → 350Hz  (approaching limit starts here)
+    90% → 620Hz  (rapid climb through critical zone)
+    100% → 800Hz (at limit)
+    >100%: stays at 800Hz — timbre change signals over-limit
+            (add 15% of a 2× harmonic when util > 100)
+    """
+    util = max(0.0, util)
     if util <= 50.0:
-        return 200.0 + util * 4.0
-    return 400.0 + (util - 50.0) * 8.0
+        return 200.0 + util * 1.6           # 200→280Hz, slow
+    elif util <= 70.0:
+        return 280.0 + (util - 50.0) * 3.5  # 280→350Hz, gentle
+    elif util <= 90.0:
+        return 350.0 + (util - 70.0) * 13.5 # 350→620Hz, rapid
+    elif util <= 100.0:
+        return 620.0 + (util - 90.0) * 18.0 # 620→800Hz, steep
+    else:
+        return 800.0  # capped — harmonic added below
 
 
 class GripToneSynth:
@@ -104,7 +123,13 @@ class GripToneSynth:
             if self._burst_pos >= len(self._burst_samples):
                 self._burst_samples = None
 
-        out = np.clip(sine + burst, -1.0, 1.0)
+        if total_util > 100.0:
+            over_pct = min((total_util - 100.0) / 30.0, 1.0)
+            harmonic = np.sin(2 * (self._phase + np.arange(frames, dtype=np.float64) * omega))
+            harmonic = (harmonic * self._volume * 0.15 * over_pct).astype(np.float32)
+            out = np.clip(sine + burst + harmonic, -1.0, 1.0)
+        else:
+            out = np.clip(sine + burst, -1.0, 1.0)
         outdata[:, 0] = out
         outdata[:, 1] = out
 

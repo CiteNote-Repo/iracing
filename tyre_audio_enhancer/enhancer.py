@@ -1,16 +1,9 @@
+import queue
+import threading
+
 import sounddevice as sd
 import numpy as np
 from scipy.signal import butter, sosfilt_zi, sosfilt
-
-BLOCKSIZE = 256  # ~5ms latency
-
-
-def get_device_info(device):
-    """Return (channels, samplerate) for the given input device."""
-    info = sd.query_devices(device)
-    channels = min(2, int(info['max_input_channels']))
-    samplerate = int(info['default_samplerate'])
-    return channels, samplerate
 
 
 class TyreAudioEnhancer:
@@ -18,18 +11,30 @@ class TyreAudioEnhancer:
                  engine_cut_db=-20, tyre_boost_db=12,
                  notch_freqs=None):
 
-        self._channels, self.sr = get_device_info(input_device)
-        print(f"Device channels: {self._channels}, sample rate: {self.sr}")
+        self._input_device  = input_device
+        self._output_device = output_device
+
+        in_info  = sd.query_devices(input_device)
+        out_info = sd.query_devices(output_device)
+
+        self._in_channels  = min(2, int(in_info['max_input_channels']))
+        self._out_channels = min(2, int(out_info['max_output_channels']))
+        self._in_sr  = int(in_info['default_samplerate'])
+        self._out_sr = int(out_info['default_samplerate'])
+        self._blocksize = 512
+
+        print(f"Input:  device {input_device}, "
+              f"{self._in_channels}ch, {self._in_sr}Hz")
+        print(f"Output: device {output_device}, "
+              f"{self._out_channels}ch, {self._out_sr}Hz")
 
         if notch_freqs is None:
-            notch_freqs = [200, 320, 400, 600, 800]
+            notch_freqs = [190, 270, 340, 550, 790]
 
-        nyq = self.sr / 2
+        nyq = self._in_sr / 2
 
-        # High-pass to remove low-frequency engine rumble below 120Hz
         self._hp_sos = butter(4, 120/nyq, btype='high', output='sos')
 
-        # Notch filters for each engine harmonic frequency
         self._notch_filters = []
         for f in notch_freqs:
             bw = f * 0.15
@@ -39,27 +44,34 @@ class TyreAudioEnhancer:
                 sos = butter(2, [low, high], btype='bandstop', output='sos')
                 self._notch_filters.append(sos)
 
-        # Bandpass for tyre-dominant frequencies (800Hz-8kHz)
         self._tyre_sos = butter(
-            2, [800/nyq, min(8000/nyq, 0.999)], btype='band', output='sos'
+            2, [min(800/nyq, 0.9), min(8000/nyq, 0.99)],
+            btype='band', output='sos'
         )
 
-        self._engine_gain = 10**(engine_cut_db/20)
-        self._tyre_gain   = 10**(tyre_boost_db/20)
+        self._tyre_gain = 10**(tyre_boost_db/20)
 
-        ch = self._channels
-        self._zi_hp = np.stack([sosfilt_zi(self._hp_sos)] * ch, axis=-1)
+        # Filter states sized for mono (1 channel)
+        n_ch = 1
+        self._zi_hp = np.stack([sosfilt_zi(self._hp_sos)] * n_ch, axis=-1)
         self._zi_notch = [
-            np.stack([sosfilt_zi(s)] * ch, axis=-1)
+            np.stack([sosfilt_zi(s)] * n_ch, axis=-1)
             for s in self._notch_filters
         ]
-        self._zi_tyre = np.stack([sosfilt_zi(self._tyre_sos)] * ch, axis=-1)
+        self._zi_tyre = np.stack([sosfilt_zi(self._tyre_sos)] * n_ch, axis=-1)
 
-        self._input_device  = input_device
-        self._output_device = output_device
+        self._q    = queue.Queue(maxsize=4)
+        self._lock = threading.Lock()
 
-    def _process_block(self, x):
-        # x shape: (in_channels, frames)
+    def _process(self, x):
+        """Process audio; x is (frames, channels) from sounddevice."""
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+        else:
+            x = x.T  # → (channels, frames); use first channel only
+            x = x[:1]
+
+        x = x.astype(np.float64)
 
         x, self._zi_hp = sosfilt(self._hp_sos, x, zi=self._zi_hp)
 
@@ -69,32 +81,48 @@ class TyreAudioEnhancer:
         x_tyre, self._zi_tyre = sosfilt(self._tyre_sos, x, zi=self._zi_tyre)
 
         x_out = x + x_tyre * (self._tyre_gain - 1.0)
-
-        # Soft clip to prevent distortion
         x_out = np.tanh(x_out * 0.8) / 0.8
 
-        # Mono input → duplicate to stereo for output
-        if x_out.shape[0] == 1:
-            x_out = np.concatenate([x_out, x_out], axis=0)
-
-        return x_out
+        return x_out  # shape (1, frames)
 
     def run(self):
-        def callback(indata, outdata, frames, time, status):
-            x = indata.T.astype(np.float64)
-            processed = self._process_block(x)
-            outdata[:] = processed.T.astype(np.float32)
+        def input_callback(indata, frames, time, status):
+            try:
+                processed = self._process(indata.copy())
+                self._q.put_nowait(processed)
+            except queue.Full:
+                pass
 
-        print(f"Input:  {self._input_device}")
-        print(f"Output: {self._output_device}")
+        def output_callback(outdata, frames, time, status):
+            try:
+                data = self._q.get_nowait()   # shape (1, frames)
+                stereo = np.vstack([data, data]).T  # → (frames, 2)
+                n = min(stereo.shape[0], frames)
+                outdata[:n] = stereo[:n].astype(np.float32)
+                if n < frames:
+                    outdata[n:] = 0
+            except queue.Empty:
+                outdata[:] = 0
+
         print("Tyre Audio Enhancer running — Ctrl+C to stop")
+        print("(Audio processing: mono input → stereo output)")
 
-        with sd.Stream(
-            device=(self._input_device, self._output_device),
-            samplerate=self.sr,
-            blocksize=BLOCKSIZE,
+        in_stream = sd.InputStream(
+            device=self._input_device,
+            samplerate=self._in_sr,
+            blocksize=self._blocksize,
+            channels=self._in_channels,
             dtype='float32',
-            channels=(self._channels, 2),  # mono in → stereo out
-            callback=callback
-        ):
+            callback=input_callback,
+        )
+        out_stream = sd.OutputStream(
+            device=self._output_device,
+            samplerate=self._out_sr,
+            blocksize=self._blocksize,
+            channels=self._out_channels,
+            dtype='float32',
+            callback=output_callback,
+        )
+
+        with in_stream, out_stream:
             sd.sleep(999_999_999)

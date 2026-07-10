@@ -22,6 +22,16 @@ def list_devices():
     print()
 
 
+def parse_device(device_str):
+    """Return int if numeric string, otherwise return as string name."""
+    if device_str is None:
+        return None
+    try:
+        return int(device_str)
+    except (ValueError, TypeError):
+        return device_str
+
+
 def find_device(name_fragment, kind):
     """Return device index matching name_fragment for the given kind."""
     devices = sd.query_devices()
@@ -71,9 +81,9 @@ def main():
 
     # CLI args override config
     if args.input:
-        cfg["input_device"] = args.input
+        cfg["input_device"] = parse_device(args.input)
     if args.output:
-        cfg["output_device"] = args.output
+        cfg["output_device"] = parse_device(args.output)
     if args.engine_cut is not None:
         cfg["engine_cut_db"] = args.engine_cut
     if args.tyre_boost is not None:

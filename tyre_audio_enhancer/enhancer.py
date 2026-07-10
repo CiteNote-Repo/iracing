@@ -59,7 +59,7 @@ class TyreAudioEnhancer:
         self._output_device = output_device
 
     def _process_block(self, x):
-        # x shape: (channels, frames)
+        # x shape: (in_channels, frames)
 
         x, self._zi_hp = sosfilt(self._hp_sos, x, zi=self._zi_hp)
 
@@ -72,6 +72,10 @@ class TyreAudioEnhancer:
 
         # Soft clip to prevent distortion
         x_out = np.tanh(x_out * 0.8) / 0.8
+
+        # Mono input → duplicate to stereo for output
+        if x_out.shape[0] == 1:
+            x_out = np.concatenate([x_out, x_out], axis=0)
 
         return x_out
 
@@ -90,7 +94,7 @@ class TyreAudioEnhancer:
             samplerate=self.sr,
             blocksize=BLOCKSIZE,
             dtype='float32',
-            channels=self._channels,
+            channels=(self._channels, 2),  # mono in → stereo out
             callback=callback
         ):
             sd.sleep(999_999_999)

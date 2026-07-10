@@ -79,11 +79,10 @@ def main():
 
     cfg = load_config()
 
-    # CLI args override config
-    if args.input:
-        cfg["input_device"] = parse_device(args.input)
-    if args.output:
-        cfg["output_device"] = parse_device(args.output)
+    # Resolve devices: CLI args take priority over saved config
+    input_dev  = parse_device(args.input)  if args.input  else cfg.get("input_device")
+    output_dev = parse_device(args.output) if args.output else cfg.get("output_device")
+
     if args.engine_cut is not None:
         cfg["engine_cut_db"] = args.engine_cut
     if args.tyre_boost is not None:
@@ -92,31 +91,35 @@ def main():
         cfg["notch_freqs"] = args.notch_freqs
 
     # Auto-detect input if not specified
-    if cfg["input_device"] is None:
+    if input_dev is None:
         detected = auto_detect_input()
         if detected:
             print(f"Auto-detected input: {detected}")
-            cfg["input_device"] = detected
+            input_dev = detected
         else:
             print("Could not auto-detect VB-Cable. Use --input DEVICE or --list-devices.")
             sys.exit(1)
 
     if args.calibrate:
         from calibrate import calibrate
-        notch_freqs = calibrate(cfg["input_device"])
+        notch_freqs = calibrate(input_dev, duration=10)
         cfg["notch_freqs"] = notch_freqs
         print("\nRun again without --calibrate to start the enhancer with these frequencies.")
         if args.save_preset:
+            cfg["input_device"]  = input_dev
+            cfg["output_device"] = output_dev
             save_config(cfg)
         sys.exit(0)
 
     if args.save_preset:
+        cfg["input_device"]  = input_dev
+        cfg["output_device"] = output_dev
         save_config(cfg)
 
     from enhancer import TyreAudioEnhancer
     enhancer = TyreAudioEnhancer(
-        input_device=cfg["input_device"],
-        output_device=cfg["output_device"],
+        input_device=input_dev,
+        output_device=output_dev,
         engine_cut_db=cfg["engine_cut_db"],
         tyre_boost_db=cfg["tyre_boost_db"],
         notch_freqs=cfg["notch_freqs"],

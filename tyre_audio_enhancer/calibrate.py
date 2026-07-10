@@ -1,7 +1,17 @@
 import sounddevice as sd
 import numpy as np
 from scipy.signal import find_peaks
+from scipy.ndimage import uniform_filter1d
 import time
+
+
+def get_device_info(device_index):
+    """Get supported channels and sample rate for a device."""
+    info = sd.query_devices(device_index)
+    channels = min(2, int(info['max_input_channels']))
+    samplerate = int(info['default_samplerate'])
+    return channels, samplerate
+
 
 def calibrate(input_device, duration=10):
     """
@@ -9,7 +19,8 @@ def calibrate(input_device, duration=10):
     the dominant engine harmonic frequencies using FFT analysis.
     Returns a list of suggested notch frequencies.
     """
-    SAMPLE_RATE = 48000
+    channels, samplerate = get_device_info(input_device)
+    print(f"Device channels: {channels}, sample rate: {samplerate}")
     print(f"Listening for {duration} seconds — rev the engine...")
 
     frames = []
@@ -19,26 +30,28 @@ def calibrate(input_device, duration=10):
 
     with sd.InputStream(
         device=input_device,
-        samplerate=SAMPLE_RATE,
-        channels=2,
+        samplerate=samplerate,
+        channels=channels,
+        dtype='float32',
         callback=callback
     ):
         time.sleep(duration)
 
-    # Combine all frames and take left channel
-    audio = np.concatenate(frames)[:, 0]
+    audio = np.concatenate(frames)
+    # Use first channel regardless of mono/stereo
+    audio_mono = audio[:, 0]
 
-    # Compute FFT magnitude spectrum
-    fft_mag = np.abs(np.fft.rfft(audio))
-    freqs   = np.fft.rfftfreq(len(audio), 1/SAMPLE_RATE)
+    fft_mag = np.abs(np.fft.rfft(audio_mono))
+    freqs   = np.fft.rfftfreq(len(audio_mono), 1/samplerate)
 
-    # Smooth the spectrum
-    from scipy.ndimage import uniform_filter1d
     fft_smooth = uniform_filter1d(fft_mag, size=20)
 
-    # Find peaks in the 80-1000Hz engine range
     mask = (freqs > 80) & (freqs < 1000)
-    peaks, props = find_peaks(
+    if mask.sum() == 0:
+        print("No frequencies detected in range")
+        return [200, 320, 400, 600, 800]
+
+    peaks, _ = find_peaks(
         fft_smooth[mask],
         height=np.percentile(fft_smooth[mask], 75),
         distance=30,
@@ -47,6 +60,10 @@ def calibrate(input_device, duration=10):
 
     peak_freqs = freqs[mask][peaks]
     peak_freqs = sorted([int(round(f/10)*10) for f in peak_freqs])
+
+    if not peak_freqs:
+        print("No clear harmonics detected — using defaults")
+        return [200, 320, 400, 600, 800]
 
     print(f"\nDetected engine harmonics: {peak_freqs} Hz")
     print(f"Suggested: --notch-freqs {' '.join(str(f) for f in peak_freqs)}")

@@ -2,78 +2,72 @@ import sounddevice as sd
 import numpy as np
 from scipy.signal import butter, sosfilt_zi, sosfilt
 
-SAMPLE_RATE = 48000
-BLOCKSIZE   = 256  # ~5ms latency
+BLOCKSIZE = 256  # ~5ms latency
+
+
+def get_device_info(device):
+    """Return (channels, samplerate) for the given input device."""
+    info = sd.query_devices(device)
+    channels = min(2, int(info['max_input_channels']))
+    samplerate = int(info['default_samplerate'])
+    return channels, samplerate
+
 
 class TyreAudioEnhancer:
     def __init__(self, input_device, output_device,
                  engine_cut_db=-20, tyre_boost_db=12,
                  notch_freqs=None):
-        self.sr = SAMPLE_RATE
+
+        self._channels, self.sr = get_device_info(input_device)
+        print(f"Device channels: {self._channels}, sample rate: {self.sr}")
 
         if notch_freqs is None:
             notch_freqs = [200, 320, 400, 600, 800]
 
+        nyq = self.sr / 2
+
         # High-pass to remove low-frequency engine rumble below 120Hz
-        self._hp_sos = butter(
-            4, 120/(self.sr/2), btype='high', output='sos'
-        )
+        self._hp_sos = butter(4, 120/nyq, btype='high', output='sos')
 
         # Notch filters for each engine harmonic frequency
         self._notch_filters = []
         for f in notch_freqs:
             bw = f * 0.15
-            low  = max(0.001, (f - bw/2) / (self.sr/2))
-            high = min(0.999, (f + bw/2) / (self.sr/2))
+            low  = max(0.001, (f - bw/2) / nyq)
+            high = min(0.999, (f + bw/2) / nyq)
             if low < high:
-                sos = butter(2, [low, high],
-                            btype='bandstop', output='sos')
+                sos = butter(2, [low, high], btype='bandstop', output='sos')
                 self._notch_filters.append(sos)
 
         # Bandpass for tyre-dominant frequencies (800Hz-8kHz)
         self._tyre_sos = butter(
-            2, [800/(self.sr/2), 8000/(self.sr/2)],
-            btype='band', output='sos'
+            2, [800/nyq, min(8000/nyq, 0.999)], btype='band', output='sos'
         )
 
         self._engine_gain = 10**(engine_cut_db/20)
         self._tyre_gain   = 10**(tyre_boost_db/20)
 
-        # Initialize stateful filter conditions for stereo (2 channels)
-        self._zi_hp = np.stack(
-            [sosfilt_zi(self._hp_sos)] * 2, axis=-1
-        )
+        ch = self._channels
+        self._zi_hp = np.stack([sosfilt_zi(self._hp_sos)] * ch, axis=-1)
         self._zi_notch = [
-            np.stack([sosfilt_zi(s)] * 2, axis=-1)
+            np.stack([sosfilt_zi(s)] * ch, axis=-1)
             for s in self._notch_filters
         ]
-        self._zi_tyre = np.stack(
-            [sosfilt_zi(self._tyre_sos)] * 2, axis=-1
-        )
+        self._zi_tyre = np.stack([sosfilt_zi(self._tyre_sos)] * ch, axis=-1)
 
         self._input_device  = input_device
         self._output_device = output_device
 
     def _process_block(self, x):
-        # x shape: (2, frames) — stereo, float32
+        # x shape: (channels, frames)
 
-        # Remove sub-120Hz engine rumble
-        x, self._zi_hp = sosfilt(
-            self._hp_sos, x, zi=self._zi_hp
-        )
+        x, self._zi_hp = sosfilt(self._hp_sos, x, zi=self._zi_hp)
 
-        # Apply engine harmonic notches
         for i, sos in enumerate(self._notch_filters):
-            x, self._zi_notch[i] = sosfilt(
-                sos, x, zi=self._zi_notch[i]
-            )
+            x, self._zi_notch[i] = sosfilt(sos, x, zi=self._zi_notch[i])
 
-        # Extract tyre band and boost it
-        x_tyre, self._zi_tyre = sosfilt(
-            self._tyre_sos, x, zi=self._zi_tyre
-        )
+        x_tyre, self._zi_tyre = sosfilt(self._tyre_sos, x, zi=self._zi_tyre)
 
-        # Mix: notched signal + extra tyre band gain
         x_out = x + x_tyre * (self._tyre_gain - 1.0)
 
         # Soft clip to prevent distortion
@@ -96,7 +90,7 @@ class TyreAudioEnhancer:
             samplerate=self.sr,
             blocksize=BLOCKSIZE,
             dtype='float32',
-            channels=2,
+            channels=self._channels,
             callback=callback
         ):
             sd.sleep(999_999_999)

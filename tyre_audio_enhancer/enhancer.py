@@ -51,27 +51,28 @@ class TyreAudioEnhancer:
 
         self._tyre_gain = 10**(tyre_boost_db/20)
 
-        # Filter states sized for mono (1 channel)
-        n_ch = 1
-        self._zi_hp = np.stack([sosfilt_zi(self._hp_sos)] * n_ch, axis=-1)
-        self._zi_notch = [
-            np.stack([sosfilt_zi(s)] * n_ch, axis=-1)
-            for s in self._notch_filters
-        ]
-        self._zi_tyre = np.stack([sosfilt_zi(self._tyre_sos)] * n_ch, axis=-1)
+        # Filter states — shape must be (n_sections, n_channels, 2)
+        # For mono: n_channels=1, so shape is (n_sections, 1, 2)
+        def _make_zi(sos):
+            zi_1ch = sosfilt_zi(sos)       # shape (n_sections, 2)
+            return zi_1ch[:, np.newaxis, :]  # shape (n_sections, 1, 2)
+
+        self._zi_hp    = _make_zi(self._hp_sos)
+        self._zi_notch = [_make_zi(s) for s in self._notch_filters]
+        self._zi_tyre  = _make_zi(self._tyre_sos)
 
         self._q    = queue.Queue(maxsize=4)
         self._lock = threading.Lock()
 
     def _process(self, x):
         """Process audio; x is (frames, channels) from sounddevice."""
+        # Ensure shape is (1, frames) for mono
         if x.ndim == 1:
-            x = x.reshape(1, -1)
-        else:
-            x = x.T  # → (channels, frames); use first channel only
-            x = x[:1]
+            x = x[np.newaxis, :]         # (1, frames)
+        elif x.shape[0] > x.shape[1]:
+            x = x.T                       # was (frames, 1), now (1, frames)
 
-        x = x.astype(np.float64)
+        x = x[:1].astype(np.float64)     # keep only first channel
 
         x, self._zi_hp = sosfilt(self._hp_sos, x, zi=self._zi_hp)
 
